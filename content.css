@@ -18,3 +18,10 @@
   background: rgba(200, 0, 0, 0.95);
 }
 
+.image-red-overlay {
+  position: fixed;
+  z-index: 2147483646;
+  background: #ff0000;
+  pointer-events: none;
+}
+

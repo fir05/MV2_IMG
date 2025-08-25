@@ -1,11 +1,13 @@
 (() => {
   const TOGGLE_ATTR = "data-image-red-toggle";
-  const ORIGINAL_SRC_ATTR = "data-original-src";
-  const ORIGINAL_SRCSET_ATTR = "data-original-srcset";
-  const PLACEHOLDER_CACHE_ATTR = "data-placeholder-url";
+  const ORIGINAL_SRC_ATTR = "data-original-src"; // no longer used for overlay approach
+  const ORIGINAL_SRCSET_ATTR = "data-original-srcset"; // kept for potential future fallbacks
+  const PLACEHOLDER_CACHE_ATTR = "data-placeholder-url"; // legacy from src-swap approach
 
   let hoverButton;
   let currentTargetImg = null;
+  const toggledImages = new Set();
+  const imageToOverlay = new WeakMap();
 
   function createHoverButton() {
     const btn = document.createElement("button");
@@ -39,26 +41,90 @@
     return { width, height };
   }
 
-  function generateRedPlaceholder(width, height) {
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext("2d");
-    ctx.fillStyle = "#ff0000";
-    ctx.fillRect(0, 0, width, height);
-    return canvas.toDataURL("image/png");
-  }
+  // Compute the rectangle of the actual drawn image content within the <img> element,
+  // taking into account object-fit and object-position. Returns viewport coordinates.
+  function computeImageContentRect(img) {
+    const rect = img.getBoundingClientRect();
+    const style = getComputedStyle(img);
+    const fit = style.objectFit || "fill";
+    const pos = style.objectPosition || "50% 50%";
+    const naturalWidth = img.naturalWidth || rect.width;
+    const naturalHeight = img.naturalHeight || rect.height;
+    const elemWidth = rect.width;
+    const elemHeight = rect.height;
 
-  function getOrCreatePlaceholder(img) {
-    const { width, height } = getRenderedSize(img);
-    const cacheKey = `${width}x${height}`;
-    const cached = img.getAttribute(PLACEHOLDER_CACHE_ATTR);
-    if (cached && cached.startsWith(cacheKey + ":")) {
-      return cached.slice(cacheKey.length + 1);
+    function parseObjectPosition(positionValue, extraWidth, extraHeight) {
+      // Returns [xPercent, yPercent] where 0 = start, 1 = end
+      // Only handles keywords and percentages; lengths default to percentages 0-1 based on available extra space.
+      let xToken = "50%";
+      let yToken = "50%";
+      const parts = positionValue.trim().split(/\s+/);
+      if (parts.length === 1) {
+        xToken = parts[0];
+        yToken = "50%";
+      } else if (parts.length >= 2) {
+        xToken = parts[0];
+        yToken = parts[1];
+      }
+      function tokenToPercent(token, isX) {
+        const lower = token.toLowerCase();
+        if (lower === "left" || lower === "top") return 0;
+        if (lower === "center") return 0.5;
+        if (lower === "right" || lower === "bottom") return 1;
+        if (lower.endsWith("%")) {
+          const val = parseFloat(lower);
+          return isFinite(val) ? val / 100 : 0.5;
+        }
+        // px lengths: approximate by clamping to 0..1 of extra space
+        if (lower.endsWith("px")) {
+          const px = parseFloat(lower);
+          const extra = isX ? extraWidth : extraHeight;
+          if (extra <= 0) return 0.5;
+          return Math.min(1, Math.max(0, px / extra));
+        }
+        return 0.5;
+      }
+      const x = tokenToPercent(xToken, true);
+      const y = tokenToPercent(yToken, false);
+      return [x, y];
     }
-    const url = generateRedPlaceholder(width, height);
-    img.setAttribute(PLACEHOLDER_CACHE_ATTR, `${cacheKey}:${url}`);
-    return url;
+
+    if (fit === "contain" || fit === "scale-down") {
+      const scaleContain = Math.min(elemWidth / naturalWidth, elemHeight / naturalHeight) || 1;
+      const drawWidth = naturalWidth * scaleContain;
+      const drawHeight = naturalHeight * scaleContain;
+      const extraX = Math.max(0, elemWidth - drawWidth);
+      const extraY = Math.max(0, elemHeight - drawHeight);
+      const [posX, posY] = parseObjectPosition(pos, extraX, extraY);
+      const left = rect.left + extraX * posX;
+      const top = rect.top + extraY * posY;
+      return new DOMRect(left, top, drawWidth, drawHeight);
+    }
+
+    if (fit === "none") {
+      // Approximate: place natural size anchored by object-position inside the element, but clip to element rect.
+      const drawWidth = naturalWidth;
+      const drawHeight = naturalHeight;
+      const extraX = Math.max(0, elemWidth - drawWidth);
+      const extraY = Math.max(0, elemHeight - drawHeight);
+      const [posX, posY] = parseObjectPosition(pos, extraX, extraY);
+      const left = rect.left + extraX * posX;
+      const top = rect.top + extraY * posY;
+      // Clip to element bounds
+      const visibleLeft = Math.max(left, rect.left);
+      const visibleTop = Math.max(top, rect.top);
+      const visibleRight = Math.min(left + drawWidth, rect.right);
+      const visibleBottom = Math.min(top + drawHeight, rect.bottom);
+      return new DOMRect(
+        visibleLeft,
+        visibleTop,
+        Math.max(0, visibleRight - visibleLeft),
+        Math.max(0, visibleBottom - visibleTop)
+      );
+    }
+
+    // cover, fill or others -> visible area is the element box
+    return new DOMRect(rect.left, rect.top, rect.width, rect.height);
   }
 
   function isToggled(img) {
@@ -67,35 +133,29 @@
 
   function toggleImage(img) {
     if (!isToggled(img)) {
-      // Store original sources
-      if (img.hasAttribute("src")) {
-        img.setAttribute(ORIGINAL_SRC_ATTR, img.getAttribute("src") || "");
-      }
-      if (img.hasAttribute("srcset")) {
-        img.setAttribute(ORIGINAL_SRCSET_ATTR, img.getAttribute("srcset") || "");
-      }
-
-      const placeholder = getOrCreatePlaceholder(img);
-      // Clear srcset so browser does not override src
-      if (img.hasAttribute("srcset")) img.removeAttribute("srcset");
-      img.setAttribute("src", placeholder);
+      const overlay = document.createElement("div");
+      overlay.className = "image-red-overlay";
+      overlay.setAttribute("aria-hidden", "true");
+      const rect = computeImageContentRect(img);
+      overlay.style.position = "fixed";
+      overlay.style.left = `${Math.round(rect.left)}px`;
+      overlay.style.top = `${Math.round(rect.top)}px`;
+      overlay.style.width = `${Math.max(1, Math.round(rect.width))}px`;
+      overlay.style.height = `${Math.max(1, Math.round(rect.height))}px`;
+      // Copy border radius to better match rounded images
+      try {
+        const cs = getComputedStyle(img);
+        overlay.style.borderRadius = cs.borderRadius;
+      } catch (_) {}
+      document.documentElement.appendChild(overlay);
+      imageToOverlay.set(img, overlay);
+      toggledImages.add(img);
       img.setAttribute(TOGGLE_ATTR, "on");
     } else {
-      const originalSrc = img.getAttribute(ORIGINAL_SRC_ATTR);
-      const originalSrcset = img.getAttribute(ORIGINAL_SRCSET_ATTR);
-
-      if (originalSrc !== null) {
-        img.setAttribute("src", originalSrc);
-        img.removeAttribute(ORIGINAL_SRC_ATTR);
-      }
-      if (originalSrcset !== null) {
-        if (originalSrcset) {
-          img.setAttribute("srcset", originalSrcset);
-        } else {
-          img.removeAttribute("srcset");
-        }
-        img.removeAttribute(ORIGINAL_SRCSET_ATTR);
-      }
+      const overlay = imageToOverlay.get(img);
+      if (overlay && overlay.parentNode) overlay.parentNode.removeChild(overlay);
+      imageToOverlay.delete(img);
+      toggledImages.delete(img);
       img.removeAttribute(TOGGLE_ATTR);
     }
   }
@@ -103,11 +163,11 @@
   function positionButton(img) {
     ensureButton();
     if (!hoverButton) return;
-    const rect = img.getBoundingClientRect();
+    const rect = computeImageContentRect(img);
     hoverButton.style.display = "block";
     hoverButton.style.position = "fixed";
     const offset = 4;
-    hoverButton.style.left = `${Math.round(rect.right - hoverButton.offsetWidth - offset)}px`;
+    hoverButton.style.left = `${Math.round(rect.left + rect.width - hoverButton.offsetWidth - offset)}px`;
     hoverButton.style.top = `${Math.round(rect.top + offset)}px`;
     currentTargetImg = img;
   }
@@ -140,6 +200,23 @@
       positionButton(currentTargetImg);
     } else {
       hideButton();
+    }
+    // Reposition overlays for all toggled images
+    for (const img of Array.from(toggledImages)) {
+      if (!document.contains(img)) {
+        const overlay = imageToOverlay.get(img);
+        if (overlay && overlay.parentNode) overlay.parentNode.removeChild(overlay);
+        imageToOverlay.delete(img);
+        toggledImages.delete(img);
+        continue;
+      }
+      const overlay = imageToOverlay.get(img);
+      if (!overlay) continue;
+      const rect = computeImageContentRect(img);
+      overlay.style.left = `${Math.round(rect.left)}px`;
+      overlay.style.top = `${Math.round(rect.top)}px`;
+      overlay.style.width = `${Math.max(1, Math.round(rect.width))}px`;
+      overlay.style.height = `${Math.max(1, Math.round(rect.height))}px`;
     }
   }
 
