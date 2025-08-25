@@ -1,0 +1,20 @@
+.image-red-toggle-button {
+  all: unset;
+  display: none;
+  position: fixed;
+  z-index: 2147483647;
+  background: rgba(255, 0, 0, 0.9);
+  color: #fff;
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, "Helvetica Neue", Arial, "Apple Color Emoji", "Segoe UI Emoji";
+  font-size: 12px;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+}
+
+.image-red-toggle-button:hover {
+  background: rgba(200, 0, 0, 0.95);
+}
+
